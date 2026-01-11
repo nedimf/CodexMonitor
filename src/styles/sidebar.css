@@ -1,0 +1,107 @@
+.sidebar {
+  padding: 36px 20px 20px;
+  background: rgba(18, 18, 18, 0.35);
+  backdrop-filter: blur(32px) saturate(1.35);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  -webkit-app-region: no-drag;
+}
+
+.sidebar-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  -webkit-app-region: no-drag;
+}
+
+.subtitle {
+  font-size: 20px;
+  font-weight: 600;
+  margin-top: 6px;
+}
+
+.workspace-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  -webkit-app-region: no-drag;
+}
+
+.workspace-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.workspace-row {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 12px;
+  padding: 8px 4px;
+  border-radius: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  -webkit-app-region: no-drag;
+}
+
+.workspace-row.active {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.workspace-row:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  margin-top: 6px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.status-dot.on {
+  background: #3fe47e;
+  box-shadow: 0 0 10px rgba(63, 228, 126, 0.6);
+}
+
+.status-dot.off {
+  background: #f7b32b;
+  box-shadow: 0 0 10px rgba(247, 179, 43, 0.6);
+}
+
+.workspace-name {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+
+.connect {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  -webkit-app-region: no-drag;
+}
+
+.agent-add {
+  width: 100%;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed rgba(255, 255, 255, 0.16);
+  color: rgba(255, 255, 255, 0.7);
+  padding: 8px 12px;
+  font-size: 12px;
+  text-align: left;
+  -webkit-app-region: no-drag;
+}

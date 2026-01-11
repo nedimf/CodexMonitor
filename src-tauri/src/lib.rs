@@ -1,0 +1,398 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{Mutex, oneshot};
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct WorkspaceEntry {
+    id: String,
+    name: String,
+    path: String,
+    codex_bin: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct WorkspaceInfo {
+    id: String,
+    name: String,
+    path: String,
+    connected: bool,
+    codex_bin: Option<String>,
+}
+
+#[derive(Serialize, Clone)]
+struct AppServerEvent {
+    workspace_id: String,
+    message: Value,
+}
+
+struct WorkspaceSession {
+    entry: WorkspaceEntry,
+    child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
+    next_id: AtomicU64,
+}
+
+impl WorkspaceSession {
+    async fn write_message(&self, value: Value) -> Result<(), String> {
+        let mut stdin = self.stdin.lock().await;
+        let mut line = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        line.push('\n');
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_request(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id, tx);
+        self.write_message(json!({ "id": id, "method": method, "params": params }))
+            .await?;
+        rx.await.map_err(|_| "request canceled".to_string())
+    }
+
+    async fn send_notification(&self, method: &str, params: Value) -> Result<(), String> {
+        self.write_message(json!({ "method": method, "params": params }))
+            .await
+    }
+
+    async fn send_response(&self, id: u64, result: Value) -> Result<(), String> {
+        self.write_message(json!({ "id": id, "result": result }))
+            .await
+    }
+}
+
+struct AppState {
+    workspaces: Mutex<HashMap<String, WorkspaceEntry>>,
+    sessions: Mutex<HashMap<String, Arc<WorkspaceSession>>>,
+    storage_path: PathBuf,
+}
+
+impl AppState {
+    fn load(app: &AppHandle) -> Self {
+        let storage_path = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| ".".into()))
+            .join("workspaces.json");
+        let workspaces = read_workspaces(&storage_path).unwrap_or_default();
+        Self {
+            workspaces: Mutex::new(workspaces),
+            sessions: Mutex::new(HashMap::new()),
+            storage_path,
+        }
+    }
+}
+
+fn read_workspaces(path: &PathBuf) -> Result<HashMap<String, WorkspaceEntry>, String> {
+    if !path.exists() {
+        return Ok(HashMap::new());
+    }
+    let data = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let list: Vec<WorkspaceEntry> = serde_json::from_str(&data).map_err(|e| e.to_string())?;
+    Ok(list.into_iter().map(|entry| (entry.id.clone(), entry)).collect())
+}
+
+fn write_workspaces(path: &PathBuf, entries: &[WorkspaceEntry]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let data = serde_json::to_string_pretty(entries).map_err(|e| e.to_string())?;
+    std::fs::write(path, data).map_err(|e| e.to_string())
+}
+
+async fn spawn_workspace_session(
+    entry: WorkspaceEntry,
+    app_handle: AppHandle,
+) -> Result<Arc<WorkspaceSession>, String> {
+    let mut command = Command::new(entry.codex_bin.clone().unwrap_or_else(|| "codex".into()));
+    command.arg("app-server");
+    command.stdin(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let stdin = child.stdin.take().ok_or("missing stdin")?;
+    let stdout = child.stdout.take().ok_or("missing stdout")?;
+    let stderr = child.stderr.take().ok_or("missing stderr")?;
+
+    let session = Arc::new(WorkspaceSession {
+        entry: entry.clone(),
+        child: Mutex::new(child),
+        stdin: Mutex::new(stdin),
+        pending: Mutex::new(HashMap::new()),
+        next_id: AtomicU64::new(1),
+    });
+
+    let session_clone = Arc::clone(&session);
+    let workspace_id = entry.id.clone();
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: Value = match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(err) => {
+                    let payload = AppServerEvent {
+                        workspace_id: workspace_id.clone(),
+                        message: json!({
+                            "method": "codex/parseError",
+                            "params": { "error": err.to_string(), "raw": line },
+                        }),
+                    };
+                    let _ = app_handle_clone.emit("app-server-event", payload);
+                    continue;
+                }
+            };
+
+            let maybe_id = value.get("id").and_then(|id| id.as_u64());
+            let has_method = value.get("method").is_some();
+            if let Some(id) = maybe_id {
+                if has_method {
+                    let payload = AppServerEvent {
+                        workspace_id: workspace_id.clone(),
+                        message: value,
+                    };
+                    let _ = app_handle_clone.emit("app-server-event", payload);
+                } else if let Some(tx) = session_clone.pending.lock().await.remove(&id) {
+                    let _ = tx.send(value);
+                }
+            } else if has_method {
+                let payload = AppServerEvent {
+                    workspace_id: workspace_id.clone(),
+                    message: value,
+                };
+                let _ = app_handle_clone.emit("app-server-event", payload);
+            }
+        }
+    });
+
+    let workspace_id = entry.id.clone();
+    let app_handle_clone = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let payload = AppServerEvent {
+                workspace_id: workspace_id.clone(),
+                message: json!({
+                    "method": "codex/stderr",
+                    "params": { "message": line },
+                }),
+            };
+            let _ = app_handle_clone.emit("app-server-event", payload);
+        }
+    });
+
+    let init_params = json!({
+        "clientInfo": {
+            "name": "codex_monitor",
+            "title": "CodexMonitor",
+            "version": "0.1.0"
+        }
+    });
+    session.send_request("initialize", init_params).await?;
+    session.send_notification("initialized", json!({})).await?;
+
+    let payload = AppServerEvent {
+        workspace_id: entry.id.clone(),
+        message: json!({
+            "method": "codex/connected",
+            "params": { "workspaceId": entry.id.clone() }
+        }),
+    };
+    let _ = app_handle.emit("app-server-event", payload);
+
+    Ok(session)
+}
+
+#[tauri::command]
+async fn list_workspaces(state: State<'_, AppState>) -> Result<Vec<WorkspaceInfo>, String> {
+    let workspaces = state.workspaces.lock().await;
+    let sessions = state.sessions.lock().await;
+    let mut result = Vec::new();
+    for entry in workspaces.values() {
+        result.push(WorkspaceInfo {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            path: entry.path.clone(),
+            codex_bin: entry.codex_bin.clone(),
+            connected: sessions.contains_key(&entry.id),
+        });
+    }
+    result.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(result)
+}
+
+#[tauri::command]
+async fn add_workspace(
+    path: String,
+    codex_bin: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceInfo, String> {
+    let name = PathBuf::from(&path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Workspace")
+        .to_string();
+    let entry = WorkspaceEntry {
+        id: Uuid::new_v4().to_string(),
+        name: name.clone(),
+        path: path.clone(),
+        codex_bin,
+    };
+
+    let session = spawn_workspace_session(entry.clone(), app).await?;
+    {
+        let mut workspaces = state.workspaces.lock().await;
+        workspaces.insert(entry.id.clone(), entry.clone());
+        let list: Vec<_> = workspaces.values().cloned().collect();
+        write_workspaces(&state.storage_path, &list)?;
+    }
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(entry.id.clone(), session);
+
+    Ok(WorkspaceInfo {
+        id: entry.id,
+        name: entry.name,
+        path: entry.path,
+        codex_bin: entry.codex_bin,
+        connected: true,
+    })
+}
+
+#[tauri::command]
+async fn remove_workspace(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let mut workspaces = state.workspaces.lock().await;
+        workspaces.remove(&id);
+        let list: Vec<_> = workspaces.values().cloned().collect();
+        write_workspaces(&state.storage_path, &list)?;
+    }
+
+    if let Some(session) = state.sessions.lock().await.remove(&id) {
+        let mut child = session.child.lock().await;
+        let _ = child.kill().await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn start_thread(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions
+        .get(&workspace_id)
+        .ok_or("workspace not connected")?;
+    let params = json!({
+        "cwd": session.entry.path,
+        "approvalPolicy": "on-request"
+    });
+    session.send_request("thread/start", params).await
+}
+
+#[tauri::command]
+async fn send_user_message(
+    workspace_id: String,
+    thread_id: String,
+    text: String,
+    state: State<'_, AppState>,
+) -> Result<Value, String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions
+        .get(&workspace_id)
+        .ok_or("workspace not connected")?;
+    let params = json!({
+        "threadId": thread_id,
+        "input": [{ "type": "text", "text": text }],
+        "cwd": session.entry.path,
+        "approvalPolicy": "on-request",
+        "sandboxPolicy": {
+            "type": "workspaceWrite",
+            "writableRoots": [session.entry.path],
+            "networkAccess": true
+        }
+    });
+    session.send_request("turn/start", params).await
+}
+
+#[tauri::command]
+async fn respond_to_server_request(
+    workspace_id: String,
+    request_id: u64,
+    result: Value,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let sessions = state.sessions.lock().await;
+    let session = sessions
+        .get(&workspace_id)
+        .ok_or("workspace not connected")?;
+    session.send_response(request_id, result).await
+}
+
+#[tauri::command]
+async fn connect_workspace(
+    id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let entry = {
+        let workspaces = state.workspaces.lock().await;
+        workspaces
+            .get(&id)
+            .cloned()
+            .ok_or("workspace not found")?
+    };
+
+    let session = spawn_workspace_session(entry.clone(), app).await?;
+    state.sessions.lock().await.insert(entry.id, session);
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let state = AppState::load(&app.handle());
+            app.manage(state);
+            Ok(())
+        })
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![
+            list_workspaces,
+            add_workspace,
+            remove_workspace,
+            start_thread,
+            send_user_message,
+            respond_to_server_request,
+            connect_workspace
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

@@ -1,0 +1,23 @@
+.composer {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  -webkit-app-region: no-drag;
+}
+
+.composer textarea {
+  flex: 1;
+  height: 60px;
+  resize: none;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(9, 12, 20, 0.6);
+  color: inherit;
+  padding: 12px 14px;
+  -webkit-app-region: no-drag;
+}
+
+.composer textarea:focus {
+  outline: none;
+  border-color: rgba(117, 180, 255, 0.8);
+}

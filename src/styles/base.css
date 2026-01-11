@@ -1,0 +1,59 @@
+:root {
+  font-family: "SF Pro Text", "SF Pro Display", -apple-system, "Helvetica Neue",
+    sans-serif;
+  color: #e6e7ea;
+  background-color: transparent;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: transparent;
+}
+
+#root {
+  height: 100vh;
+}
+
+.app {
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  background: transparent;
+  border-radius: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.drag-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 24px;
+  z-index: 2;
+}
+
+
+@media (max-width: 960px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    flex-direction: row;
+    align-items: center;
+    overflow-x: auto;
+  }
+
+  .content {
+    grid-template-columns: 1fr;
+  }
+}

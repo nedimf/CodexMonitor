@@ -1,0 +1,40 @@
+.main {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 16px;
+  padding: 36px 32px 24px;
+  position: relative;
+  -webkit-app-region: no-drag;
+}
+
+.main-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  -webkit-app-region: no-drag;
+}
+
+.workspace-title {
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.workspace-meta {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+}
+
+.content {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 16px;
+  min-height: 0;
+  -webkit-app-region: no-drag;
+}
